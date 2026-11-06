@@ -1,0 +1,2338 @@
+---
+title: "Script for MB5370 Project"
+author: "Dhevin Fernando"
+format: html
+editor: visual
+---
+
+# Adding 2016 data and creating table
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+
+metadata_2016_raw <- read_csv("../data/2016metadata.csv")
+dives_2016 <- metadata_2016_raw %>%
+  filter(!is.na(Site) & !is.na(Date) & !is.na(Comments)) %>% #dropping NA fields
+  # parsing dates to fix mdy formatting and formatting site names
+  mutate(
+    Date_clean = parse_date_time(Date, orders = c("mdy", "ymd", "dmy")),
+    Site_clean = str_to_title(str_replace_all(Site, "'", "")),
+    Comments_clean = str_trim(Comments), #remove whitespace
+    #seperate year month and date 
+    Year= year(Date_clean),
+    Month_num = month(Date_clean),
+    Month = month(Date_clean, label = TRUE, abbr = FALSE),   
+    #make dive id for 2016 with date comments and site
+    Dive_ID = paste(Site_clean, format(Date_clean, "%Y-%m-%d"), Comments_clean, sep = "_"))
+
+dives_2016_distinct <- dives_2016 %>%
+  # preventing replication of dives for each image
+  distinct(Dive_ID, .keep_all = TRUE) %>%
+  select(Dive_ID, Site = Site_clean, Date_clean, Year, Month_num, Month) #select metadata to keep
+
+
+# work on post 2018 metadata
+metadata_post2018_raw <- read_csv("../data/metadata (2) cleaned with 20182022 added.csv")
+dives_post2018 <- metadata_post2018_raw %>%
+  filter(!is.na(Site) & !is.na(Date)) %>% # drop NA fields for site and date
+  # parse date, clean site names and extract hour from dive start time
+  mutate(
+    Date_clean = parse_date_time(Date, orders = c("mdy", "ymd", "dmy")), #conver mdy to dmy
+    Site_clean = str_to_title(str_replace_all(Site, "'", "")), # remove apostrophes
+    Hour = str_extract(`Time (24hr)`, "^\\d+"), # extract the hour stopping at the semi colon ^ is start of text string \\ signifies digits and + one or more digits
+    Hour = str_pad(Hour, width = 2, side = "left", pad = "0"), #add 0s to the first value
+    #seperate year month and date
+    Year= year(Date_clean),
+    Month_num  = month(Date_clean),
+    Month = month(Date_clean, label = TRUE, abbr = FALSE),
+    # construct Dive_ID withs site date and hour
+    Dive_ID    = paste(Site_clean, format(Date_clean, "%Y-%m-%d"), paste0("H", Hour), sep = "_"))
+
+
+dives_post2018_distinct <- dives_post2018 %>%
+  # remove duplication
+  distinct(Dive_ID, .keep_all = TRUE) %>%
+  select(Dive_ID, Site = Site_clean, Date_clean, Year, Month_num, Month)#select necessary metadata
+
+
+# append 2016 dives to post 2018 dives for a master dive metadata set
+all_dives_metadata_distinct <- bind_rows(dives_2016_distinct, dives_post2018_distinct) %>%
+  distinct(Dive_ID, .keep_all = TRUE)#with distinct entries
+
+all_dives_metadata <- bind_rows(dives_2016, dives_post2018)#full metadata for all images
+
+# #dive effort by year -erroneous
+# table_all_year_site <- all_dives_metadata %>%
+#   group_by(Year, Site) %>%
+#   summarise(Total_Dives = n(), .groups = "drop") %>%
+#   pivot_wider(
+#     names_from  = Site,
+#     values_from = Total_Dives,
+#     values_fill = 0
+#   ) %>%
+#   arrange(Year)
+
+#dive effort by year
+table_all_year_site <- all_dives_metadata %>%
+  group_by(Year, Site) %>%
+  summarise(
+    Total_Dives  = n_distinct(Dive_ID), # this is the fix, counts unique dives
+    # Total_Images = n(),
+    .groups      = "drop"
+  ) %>%
+  pivot_wider(
+    names_from= Site,
+    values_from = Total_Dives,
+    values_fill = 0
+  ) %>%
+  arrange(Year)
+
+table_all_years <- all_dives_metadata %>%
+  group_by(Year) %>%
+  summarise(
+    Total_Dives  = n_distinct(Dive_ID), # this is the fix, counts unique dives
+    # Total_Images = n(),
+    .groups      = "drop"
+  ) %>%
+ # pivot_wider(
+ #   names_from= Site,
+ #   values_from = Total_Dives,
+ #   values_fill = 0
+ # ) %>%
+  arrange(Year)
+#write_csv(table_all_year_site, "table_all_year_site.csv")
+
+# #dive effort by year and month -erroneous
+# table_all_year_month_site <- all_dives_metadata %>%
+#   group_by(Year, Month, Site) %>%
+#   summarise(Total_Dives = n(), .groups = "drop") %>%
+#   arrange(Year, Month) %>%
+#   pivot_wider(
+#     names_from  = Site,
+#     values_from = Total_Dives,
+#     values_fill = 0
+#   )
+
+#dive effort by year and month
+table_all_year_month_site <- all_dives_metadata %>%
+  group_by(Year, Month, Site) %>%
+  summarise(Total_Dives = n_distinct(Dive_ID), .groups = "drop") %>%
+  arrange(Year, Month) %>%
+  pivot_wider(
+    names_from  = Site,
+    values_from = Total_Dives,
+    values_fill = 0
+  )
+```
+
+# Re-attempting data wrangling based on previous meeting.
+
+major changes made:
+
+split substrate category into sand rock, clamshell and rubble
+
+excluding obscured categories to recalculate/ rescale percentage cover
+
+selection of better sampling years will be conducted once more data is added
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+#| out-width: "100%"
+library(tidyverse)
+library(ggplot2)
+
+percent_covers_raw <- read_csv("../data/percent_covers(with20162022noALLIMAGESstats)v2.csv")
+# vectors listing all individual species/genera for each category from columns in the dataset
+hc_cols <- c("Acanthastrea", "Acropora", "Alveopora", "Coscinaraea", "Cynarina", 
+             "Dipsastraea", "Echinophyllia", "Echinopora", "Favia", "Favites", 
+             "Fungia", "Galaxea", "Goniastrea", "Goniopora", "Hard coral", 
+             "Heteropsammia", "Leptoria", "Leptoseris incrustans", "Montastraea", 
+             "Montipora", "Pavona", "Platygyra", "Pocillopora", "Porites", 
+             "Psammocora", "Scolymia", "Stylophora", "Tubastrea", 
+             "Turbinaria (coral)", "Millepora")
+
+sc_cols <- c("Cladiella", "Dendronephthya", "Leptogorgia virgulata", "Lobophytum", 
+             "Nephthya", "Sarcophyton", "Sclerophytum", "Soft Coral")
+
+# algae_cols <- c("CCA (crustose coralline algae)", "Ceramium sp.", 
+#                 "Halimeda", "Hypnea pannosa", "Jania", "Jania rubens", 
+#                 "Lobophora", "Macroalgae", "Padina", "Turf algae", "Ulva", "Valonia spp.")
+
+turfalgae_cols <- c("Ceramium sp.", "Jania", "Jania rubens","Turf algae")
+
+macroalgae_cols <- c( "Halimeda", "Hypnea pannosa", 
+                     "Lobophora", "Macroalga", "Padina", "Ulva", "Valonia spp.")
+
+cca_cols <- c("CCA (crustose coralline algae)")
+
+sponge_cols <- c("Cliona", "haliclona sp", "Ircinia sp.", "Sponge")
+
+bleached_hc_cols <- c("Dead coral")
+bleached_sc_cols <- c("Sclerophytum - bleached")
+bleached_algae_cols <- c("bleached cca")
+
+# new substrate columns
+sand_cols <- c("Sand")
+rock_cols<- c("Rock")
+rubble_cols <- c("Rubble")
+clam_shell_cols <- c("Clam Shell")
+
+seagrass_cols  <- c("Seagrass")
+other_invert_cols <- c("Anemone", "Ascidian", "Echinoderms", "Hydroid", 
+                       "Nudibranch sp. - Egg Case Ribbon", "Nudibranch, unidentified", "Tridacna: Giant clam", "Zoanthid")
+
+obscured_cols <- c("Tape_TWS", "Shadow")
+
+#categorisation/ summing the genera within each category creating new columns within the dataframe with mutate
+percent_covers_categorized <- percent_covers_raw %>%
+  mutate(
+    `Hard Coral` = rowSums(across(any_of(hc_cols)), na.rm = TRUE),
+    `Soft Coral` = rowSums(across(any_of(sc_cols)), na.rm = TRUE),
+    `Turf Algae` = rowSums(across(any_of(turfalgae_cols)), na.rm = TRUE),
+    `Macroalgae` = rowSums(across(any_of(macroalgae_cols)), na.rm = TRUE),
+    `Crustose Coralline Algae` = rowSums(across(any_of(cca_cols)), na.rm = TRUE),
+    `Sponge` = rowSums(across(any_of(sponge_cols)), na.rm = TRUE),
+    `Bleached Hard Coral` = rowSums(across(any_of(bleached_hc_cols)), na.rm = TRUE),
+    `Bleached Soft Coral` = rowSums(across(any_of(bleached_sc_cols)), na.rm = TRUE),
+    `Bleached Algae` = rowSums(across(any_of(bleached_algae_cols)), na.rm = TRUE),
+    `Sand` = rowSums(across(any_of(sand_cols)), na.rm = TRUE),
+    `Rock` = rowSums(across(any_of(rock_cols)), na.rm = TRUE),
+    `Rubble` = rowSums(across(any_of(rubble_cols)), na.rm = TRUE),
+    `Shell Fragments` = rowSums(across(any_of(clam_shell_cols)), na.rm = TRUE),
+    
+    `Seagrass` = rowSums(across(any_of(seagrass_cols)), na.rm = TRUE),
+    `Other Invertebrates` = rowSums(across(any_of(other_invert_cols)), na.rm = TRUE),
+    #total obscured cover
+    obscured_raw = rowSums(across(any_of(obscured_cols)), na.rm = TRUE),
+    # Normalization multiplier to scale remaining cover to 100% after removing obscured cover
+    norm_mult = if_else(obscured_raw < 100, 100 / (100 - obscured_raw), 1)
+  ) %>%
+  # Apply normalization to valid categories
+  mutate(across(
+    c(`Hard Coral`, `Soft Coral`, `Turf Algae`, `Macroalgae`, `Crustose Coralline Algae`, `Sponge`,
+      `Bleached Hard Coral`, `Bleached Soft Coral`, `Bleached Algae`,
+      `Sand`, `Rock`, `Rubble`, `Shell Fragments`, `Seagrass`, `Other Invertebrates`), ~ .x * norm_mult))
+
+#joiun with the metadata while excluding the 2018 years in the join
+joined_cover_data <- percent_covers_categorized %>%
+  inner_join(all_dives_metadata, by = c("Image name" = "Name")) %>%# inner join percent covers with metadata using filenames for jpgs
+  filter(Year != 2018, Year != 2026, Year != 2024) #excludes 2018 images because cover hasnt been calculated for them
+
+#create a variable for all the target categories
+all_categories <- c(
+  "Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge", 
+  "Bleached Hard Coral", "Bleached Soft Coral", "Bleached Algae", 
+  "Sand", "Rock", "Rubble", "Shell Fragments",
+  "Seagrass", "Other Invertebrates"
+)
+
+core_sites <- c("Batfish", "Caves", "Devils Peak", "Pao") ##commented out as sites have been collapsed on years
+#create a summary data frame using pivot longer moving categories to rows (filtered to core sites)
+site_year_summary <- joined_cover_data %>% filter(Site_clean %in% core_sites) %>% ## commented out as we arent narrowing replicates to core sites anymore
+  pivot_longer(
+    cols = all_of(all_categories),
+    names_to = "Category",
+    values_to = "Cover"
+  ) %>%
+  #group_by(Dive_ID, Site_clean, Year, Category) %>%# group by transect/dive
+  group_by(Dive_ID, Year, Category) %>%# group by transect/dive
+  summarise(transect_cover = mean(Cover, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Year, Category) %>%
+  #group_by(Site_clean, Year, Category) %>%
+  summarise(#summary statistics
+    n_dives = n_distinct(Dive_ID),
+    mean_cover = mean(transect_cover, na.rm = TRUE),
+    se_cover = sd(transect_cover, na.rm = TRUE) / sqrt(n_dives),
+    .groups = "drop"
+  )
+
+#lineplot 1
+target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge")
+core_sites <- c("Batfish", "Caves", "Devils Peak", "Pao")
+
+focused_summary <- site_year_summary %>%
+  filter(
+    Category %in% target_groups,
+    #Site_clean %in% core_sites,
+    #Year != 2026  # Filtered out 2026, comment out to add 2026 back
+  )
+
+ggplot(focused_summary, aes(x = factor(Year), y = mean_cover, color = Category, group = Category)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_cover - se_cover, ymax = mean_cover + se_cover), width = 0.2) +
+  #facet_wrap(~ Site_clean) + #facet by site
+  theme_minimal() +
+  labs(
+    title = "Key Yearly Benthic Cover Category Trends",
+    x = "Year",
+    y = "Mean Cover (%)"
+  )+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+core_sites <- c("Batfish", "Caves", "Devils Peak", "Pao")
+#core_summary <- site_year_summary %>% filter(Site_clean %in% core_sites)
+
+#line plot 2 focusing on turf
+
+target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Sponge")
+core_sites <- c("Batfish", "Caves", "Devils Peak", "Pao")
+
+focused_summary <- site_year_summary %>%
+  filter(
+    Category %in% target_groups,
+    #Site_clean %in% core_sites,
+    #Year != 2026  # Filtered out 2026, comment out to add 2026 back
+  )
+
+ggplot(focused_summary, aes(x = factor(Year), y = mean_cover, color = Category, group = Category)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_cover - se_cover, ymax = mean_cover + se_cover), width = 0.2) +
+  #facet_wrap(~ Site_clean) + #facet by site
+  theme_minimal() +
+  labs(
+    title = "Key Yearly Benthic Cover Category Trends",
+    x = "Year",
+    y = "Mean Cover (%)"
+  )+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#line plot 3 focusing on different algal types
+
+target_groups <- c("Turf Algae", "Macroalgae", "Crustose Coralline Algae")
+core_sites <- c("Batfish", "Caves", "Devils Peak", "Pao")
+
+focused_summary <- site_year_summary %>%
+  filter(
+    Category %in% target_groups,
+    #Site_clean %in% core_sites,
+    #Year != 2026  # Filtered out 2026, comment out to add 2026 back
+  )
+
+ggplot(focused_summary, aes(x = factor(Year), y = mean_cover, color = Category, group = Category)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_cover - se_cover, ymax = mean_cover + se_cover), width = 0.2) +
+  #facet_wrap(~ Site_clean) + #facet by site
+  theme_minimal() +
+  labs(
+    title = "Key Yearly Algal Cover Category Trends",
+    x = "Year",
+    y = "Mean Cover (%)"
+  )+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+core_sites <- c("Batfish", "Caves", "Devils Peak", "Pao")
+#core_summary <- site_year_summary %>% filter(Site_clean %in% core_sites)
+
+# # line plot 2
+# ggplot(core_summary, aes(x = factor(Year), y = mean_cover, color = Site_clean, group = Site_clean)) +
+#   geom_line(linewidth = 0.8) +
+#   geom_point(size = 2) +
+#   geom_errorbar(aes(ymin = mean_cover - se_cover, ymax = mean_cover + se_cover), width = 0.2) +
+#   facet_wrap(~ Category, scales = "free_y") + #faceted by category
+#   theme_minimal() +
+#   labs(
+#     title = "Benthic Trajectories by Category (Excluding 2018 & Obscured Areas)",
+#     y = "Re-normalized Mean Cover (%)",
+#     x = "Year"
+#   ) +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+# bar plot pallete
+palette <- c(
+  "Hard Coral" = "#0072B2", 
+  "Soft Coral" = "#56B4E9", 
+  #"Algae" = "#009E73", 
+  "Sponge"  = "#E69F00", 
+  "Bleached Hard Coral" = "#D55E00",
+  "Bleached Soft Coral" = "#CC79A7", 
+  "Bleached Algae" = "#F0E442", 
+  "Sand" = "#F5C710", 
+  "Rock" = "#999999", 
+  "Rubble" = "#4A4A4A", 
+  "Shell Fragments" = "#882255", 
+  "Seagrass" = "#117733", 
+  "Other Invertebrates" = "#AA4499",  
+  "Turf Algae" ="#009E01", 
+  "Macroalgae" ="#009E73", 
+  "Crustose Coralline Algae" ="#001E73" 
+)
+#ggplot(site_year_summary %>% filter(Year != 2026),
+#ggplot(site_year_summary %>% filter(Site_clean %in% core_sites, Year != 2026),
+ggplot(site_year_summary, 
+       aes(x = factor(Year), y = mean_cover, fill = Category)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = palette) +
+  #facet_wrap(~ Site_clean) +
+  theme_minimal() +
+  labs(#title = "Mean Benthic Composition Across Survey Years",
+       #subtitle = "Plotted Using Raw Sample Means",
+       x = "Year", y = "Mean Cover (%)") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+fix this, apparently a group by sites issue
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+#| out-width: "100%"
+# Lineplot faceted by Benthic Category
+target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge")
+
+focused_summary <- site_year_summary %>%
+  filter(
+    Category %in% target_groups,
+    Year != 2026  # Filtered out 2026
+  )
+
+ggplot(focused_summary, aes(x = factor(Year), y = mean_cover, group = Category, color = Category)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = pmax(0, mean_cover - se_cover), ymax = mean_cover + se_cover), width = 0.2) +
+  facet_wrap(~ Category, scales = "free_y") +  # Facet by functional group with independent y-axes
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Yearly Cover Trends by Benthic Functional Group",
+    x = "Survey Year",
+    y = "Mean Substrate Cover (%)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",  # Removes redundant color legend since facets label categories
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+# NOAA Coral Watch Data Visualisation
+
+# 
+
+**shift focus to algae, do any modelling with sites as a random effect**
+
+ADD MAXIMUM MONTHLY MEANS TO DHW PLOT AS LINE PARALLEL TO X AXIS
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4
+#| out-width: "100%"
+library(RColorBrewer)
+library(lubridate)
+library(ggplot2)
+library(tidyverse)
+
+# load data
+sstdata <- read.csv("../data/DHWGUINJATA2006.csv", strip.white = TRUE, header = TRUE)
+
+# use mutate to edit time field to a posixct value
+head(sstdata)
+sstdata <- sstdata %>% #converts time field to a posixct value
+  mutate(time = ymd_hms(time)#convertrs time field to a posixct value
+         #,time = date(time) converting posixct to date only (uneccessary for this)
+  ) %>%
+  filter(time >= as.Date("2010-01-01")) #edit this to edit where timescale starts
+head(sstdata)
+# plot SST line colored by DHW values
+sst_plot <- ggplot(sstdata, aes(x = time, y = CRW_SST)) +
+  geom_col(aes(color=CRW_DHW),  show.legend=T) + #plots geom cols overlay
+  geom_line(linewidth = 0.8) +
+  geom_hline(
+    yintercept = 27.78, 
+    linetype = "dashed", 
+    color = "red", 
+    linewidth = 0.8
+  ) +
+  annotate(
+    "text", 
+    x = as.Date("2024-06-01"), 
+    y = 30.2, 
+    label = "MMM = 27.78°C", 
+    color = "red", 
+    fontface = "bold",
+    size = 3.5
+  ) +
+  ##comment out from here##
+  geom_hline(
+    yintercept = 28.78, 
+    #linetype = "dashed", 
+    color = "violet", 
+    linewidth = 0.8
+  ) +
+  annotate(
+    "text", 
+    x = as.Date("2013-06-01"), 
+    y = 30.2, 
+    label = "Bleaching Threshold = 28.78°C", 
+    color = "violet", 
+    fontface = "bold",
+    size = 3.5
+  ) +
+  ##comment out from here##
+  scale_color_gradientn(
+    "Degree Heating Weeks (°C-weeks)",
+    colors = rev(brewer.pal(10, "RdYlBu"))# reverses the color gradient, picks the number of distinct shades and color palette
+  ) +
+  scale_y_continuous("Sea Surface Temperature (°C)") +
+  scale_x_date(
+    "Years",
+    breaks = seq(as.Date("2006-01-01"), as.Date("2026-01-01"), by = "1 year"), # sets one year breaks on the x axis
+    date_labels = "%Y", #labels x axis on year alone
+    expand = c(0, 0)
+  )+ labs(#title = "Sea Surface Temperatures and Heat Stress Events at Jangamo Bay (2010-2025)",
+    x = "Year" ) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+sst_plot
+
+
+```
+
+Cyclones in jangamo (track intersect)
+
+```{r}
+library(lubridate)
+library(sf)
+library(tidyverse)
+
+# read header first to get column names and then skip metadata row (row 2)
+raw_data <- read_csv("../data/ibtracs.ALL.list.v04r00.csv", skip = 2, col_names = FALSE, show_col_types = FALSE)
+header <- read_csv("../data/ibtracs.ALL.list.v04r00.csv", n_max = 1, show_col_types = FALSE)
+colnames(raw_data) <- colnames(header)
+
+# clean and filter data
+ibtracs_clean <- raw_data %>%
+  # parse date and filter from 2006-2025
+  mutate(ISO_TIME = ymd_hms(ISO_TIME),
+         YEAR = year(ISO_TIME)) %>%
+  filter(YEAR >= 2010 & YEAR <= 2025) %>%
+  #geographic coordinates to numeric conversion
+  mutate(LAT = as.numeric(LAT),
+         LON = as.numeric(LON),
+         USA_WIND = as.numeric(USA_WIND)) %>%
+  filter(!is.na(LAT) & !is.na(LON))
+
+# bounding box for guinjata bay constructed
+# Jangamo center is approx Lat: -24.11, Lon: 35.31
+# Bounding Box covering Jangamo district & immediate offshore waters:
+#jangamo_bbox <- st_bbox(c(xmin = 35.1, xmax = 35.7, ymin = -24.4, ymax = -23.8), crs = st_crs(4326))
+
+##bounding box guinjata specifically
+#jangamo_bbox <- st_bbox(c(xmin = 35.45, xmax = 35.54, ymin = -24.11, ymax = -24.03), crs = st_crs(4326))
+jangamo_bbox <- st_bbox(c(xmin = 35.453610788027646, xmax = 35.54661079375808, ymin = -24.08297066008683, ymax = -24.042865383716418), crs = st_crs(4326))
+#convert IBTrACS points into sf spatial object
+ibtracs_sf <- st_as_sf(ibtracs_clean, coords = c("LON", "LAT"), crs = 4326)
+
+#create a 150 km buffer around Jangamo to capture track points impacting region
+jangamo_poly <- st_as_sfc(jangamo_bbox)
+jangamo_buffer <- st_buffer(st_transform(jangamo_poly, 32736), dist = 100000) %>% 
+  st_transform(4326)
+
+# spatial intersection
+impact_points <- st_intersection(ibtracs_sf, jangamo_buffer)
+
+# summarize unique cyclones
+jangamo_cyclones <- impact_points %>%
+  st_drop_geometry() %>%
+  group_by(SID, NAME, YEAR) %>%
+  summarise(
+    First_Impact = min(ISO_TIME),
+    Last_Impact = max(ISO_TIME),
+    Max_Wind_Kts = max(USA_WIND, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(First_Impact)
+
+print(jangamo_cyclones)
+```
+
+cyclones in jangamo (wind radii intersect) (need previous block of code to work)
+
+```{r}
+library(ggrepel)
+library(tidyverse)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+
+# 1. Base spatial setup & bounding box pre-filter
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Extract coordinates directly from sf geometry to avoid missing column errors
+coords_all <- st_coordinates(ibtracs_sf)
+
+# Filter raw points geographically first using spatial coordinates
+# (This drops 95%+ of global tracks instantly without needing LAT/LON columns)
+regional_mask <- coords_all[, 2] >= -30 & coords_all[, 2] <= -18 &
+  coords_all[, 1] >= 30  & coords_all[, 1] <= 42
+
+ibtracs_regional <- ibtracs_sf[regional_mask, ]
+
+# Convert regional points to UTM Zone 36S (meters)
+ibtracs_utm <- st_transform(ibtracs_regional, 32736)
+
+# Extract 34-knot wind radii (Nautical Miles to Meters: 1 NM = 1852 m)
+ibtracs_utm <- ibtracs_utm %>%
+  mutate(
+    R34_NE = coalesce(as.numeric(USA_R34_NE) * 1852, 50000),
+    R34_SE = coalesce(as.numeric(USA_R34_SE) * 1852, 50000),
+    R34_SW = coalesce(as.numeric(USA_R34_SW) * 1852, 50000),
+    R34_NW = coalesce(as.numeric(USA_R34_NW) * 1852, 50000)
+  )
+
+# Replace 0 values with 50km default fallback
+ibtracs_utm <- ibtracs_utm %>%
+  mutate(across(c(R34_NE, R34_SE, R34_SW, R34_NW), ~ if_else(.x == 0, 50000, .x)))
+
+# 2. Vectorized 4-quadrant wind polygon generator
+coords_mat <- st_coordinates(ibtracs_utm)
+
+wind_geoms <- pmap(
+  list(coords_mat[, 1], coords_mat[, 2], 
+       ibtracs_utm$R34_NE, ibtracs_utm$R34_SE, 
+       ibtracs_utm$R34_SW, ibtracs_utm$R34_NW),
+  function(cx, cy, ne, se, sw, nw) {
+    angles_ne <- seq(0, pi/2, length.out = 8)
+    angles_nw <- seq(pi/2, pi, length.out = 8)
+    angles_sw <- seq(pi, 3*pi/2, length.out = 8)
+    angles_se <- seq(3*pi/2, 2*pi, length.out = 8)
+    
+    poly_coords <- rbind(
+      cbind(cx + ne * cos(angles_ne), cy + ne * sin(angles_ne)),
+      cbind(cx + nw * cos(angles_nw), cy + nw * sin(angles_nw)),
+      cbind(cx + sw * cos(angles_sw), cy + sw * sin(angles_sw)),
+      cbind(cx + se * cos(angles_se), cy + se * sin(angles_se))
+    )
+    poly_coords <- rbind(poly_coords, poly_coords[1, ])
+    st_polygon(list(poly_coords))
+  }
+)
+
+# Assign wind polygons as active spatial geometries
+ibtracs_wind_sf <- ibtracs_utm
+ibtracs_wind_sf$geometry <- st_sfc(wind_geoms, crs = 32736)
+
+# 3. Transform jangamo_buffer to match UTM projection
+jangamo_buffer_utm <- st_transform(jangamo_buffer, 32736)
+
+# 4. Filter cyclones by checking if WIND RADII intersect the Jangamo buffer
+impact_sids <- ibtracs_wind_sf %>%
+  filter(st_intersects(geometry, jangamo_buffer_utm, sparse = FALSE)[, 1]) %>%
+  pull(SID) %>%
+  unique()
+
+
+# 5. Extract FULL track points (WGS84) for storms identified via wind radii intersection
+impact_tracks_sf <- ibtracs_sf %>%
+  filter(SID %in% impact_sids) %>%
+  arrange(SID, ISO_TIME)
+
+# Summarize unique cyclones and their impact duration & max wind
+jangamo_cyclones_summary <- impact_tracks_sf %>%
+  st_drop_geometry() %>%
+  mutate(USA_WIND = as.numeric(USA_WIND)) %>%
+  group_by(SID, NAME, YEAR) %>%
+  summarise(
+    First_Impact = min(ISO_TIME),
+    Last_Impact = max(ISO_TIME),
+    Max_Wind_Kts = max(USA_WIND, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(First_Impact)
+# Convert track points into continuous lines for each identified cyclone
+jangamo_cyclones <- impact_tracks_sf %>%
+  group_by(SID, NAME, YEAR) %>%
+  summarise(do_union = FALSE, .groups = "drop") %>%
+  st_cast("LINESTRING")
+
+
+```
+
+track plot with central pressure
+
+track plot with radii FACETED
+
+```{r}
+#| fig-width: 7
+#| fig-height: 7
+#| out-width: "100%"
+library(ggrepel)
+library(tidyverse)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+
+# 1. Base Map Setup
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Extract unique storm IDs
+impact_sids <- jangamo_cyclones$SID
+
+# 2. Filter tracks, convert R34 radii (NM to meters), and set chronological levels
+tracks_with_radii <- ibtracs_sf %>%
+  filter(SID %in% impact_sids) %>%
+  mutate(
+    Pressure_hPa = as.numeric(USA_PRES),
+    R34_NE = coalesce(as.numeric(USA_R34_NE) * 1852, 50000),
+    R34_SE = coalesce(as.numeric(USA_R34_SE) * 1852, 50000),
+    R34_SW = coalesce(as.numeric(USA_R34_SW) * 1852, 50000),
+    R34_NW = coalesce(as.numeric(USA_R34_NW) * 1852, 50000),
+    NAME_YEAR = paste0(NAME, " (", YEAR, ")")
+  ) %>%
+  mutate(across(c(R34_NE, R34_SE, R34_SW, R34_NW), ~ if_else(.x == 0, 50000, .x))) %>%
+  arrange(ISO_TIME)
+
+# Order NAME_YEAR factor levels chronologically based on first occurrence
+ordered_labels <- tracks_with_radii %>%
+  group_by(NAME_YEAR) %>%
+  summarise(first_time = min(ISO_TIME), .groups = "drop") %>%
+  arrange(first_time) %>%
+  pull(NAME_YEAR)
+
+tracks_with_radii <- tracks_with_radii %>%
+  mutate(NAME_YEAR = factor(NAME_YEAR, levels = ordered_labels))
+
+# Project points to UTM zone 36S (meters) to construct spatial geometry for swaths
+tracks_utm <- st_transform(tracks_with_radii, 32736)
+
+# 3. Vectorized 4-quadrant wind polygon generator
+coords_mat <- st_coordinates(tracks_utm)
+
+wind_geoms <- pmap(
+  list(coords_mat[, 1], coords_mat[, 2], 
+       tracks_utm$R34_NE, tracks_utm$R34_SE, 
+       tracks_utm$R34_SW, tracks_utm$R34_NW),
+  function(cx, cy, ne, se, sw, nw) {
+    angles_ne <- seq(0, pi/2, length.out = 8)
+    angles_nw <- seq(pi/2, pi, length.out = 8)
+    angles_sw <- seq(pi, 3*pi/2, length.out = 8)
+    angles_se <- seq(3*pi/2, 2*pi, length.out = 8)
+    
+    poly_coords <- rbind(
+      cbind(cx + ne * cos(angles_ne), cy + ne * sin(angles_ne)),
+      cbind(cx + nw * cos(angles_nw), cy + nw * sin(angles_nw)),
+      cbind(cx + sw * cos(angles_sw), cy + sw * sin(angles_sw)),
+      cbind(cx + se * cos(angles_se), cy + se * sin(angles_se))
+    )
+    poly_coords <- rbind(poly_coords, poly_coords[1, ])
+    st_polygon(list(poly_coords))
+  }
+)
+
+# Assign wind polygons as active spatial geometries
+tracks_utm$geometry_poly <- st_sfc(wind_geoms, crs = 32736)
+
+# 4. Merge individual observation shapes into storm impact swaths per cyclone
+swaths_sf <- tracks_utm %>%
+  st_drop_geometry() %>%
+  st_set_geometry("geometry_poly") %>%
+  group_by(SID, NAME, YEAR, NAME_YEAR) %>%
+  summarise(geometry = st_union(geometry_poly), .groups = "drop") %>%
+  st_transform(4326) # Transform back to standard WGS84 coordinates
+
+# 5. Build full 2-point line segments across ALL track points
+segments_all <- tracks_with_radii %>%
+  group_by(SID, NAME_YEAR) %>%
+  mutate(next_geom = lead(geometry)) %>%
+  filter(!st_is_empty(next_geom)) %>%
+  rowwise() %>%
+  mutate(
+    geometry = st_sfc(st_linestring(rbind(st_coordinates(geometry), 
+                                          st_coordinates(next_geom))), 
+                      crs = 4326)
+  ) %>%
+  ungroup() %>%
+  st_as_sf()
+
+# Define map framing box
+map_bounds <- st_bbox(c(xmin = 32.0, xmax = 40.0, ymin = -27.0, ymax = -20.0), crs = st_crs(4326))
+
+# Add Jangamo / Guinjata Bay point location
+jangamo_point <- st_sf(
+  name = "Guinjata Bay",
+  geometry = st_sfc(st_point(c(35.495697967176504, -24.071923288725014)), crs = 4326)
+)
+
+# 6. Plot Faceted Tracks Chronologically
+ggplot() +
+  # Draw base map
+  geom_sf(data = world, fill = "#e0e0e0", color = "#ffffff", linewidth = 0.3) +
+  
+  # Draw Jangamo Target Zone
+  geom_sf(data = jangamo_buffer, fill = "gold", alpha = 0.3, color = "darkorange", linetype = "solid") +
+  
+  # Layer 1: Draw Wind Swath Polygons (Shaded Impact Zones)
+  geom_sf(data = swaths_sf, fill = "#3182bd", alpha = 0.25, color = NA) +
+  
+  # Layer 2a: Underlying baseline for COMPLETE cyclone track paths (grey line)
+  geom_sf(data = segments_all, color = "grey50", linewidth = 0.8) +
+  
+  # Layer 2b: Overlay track segments colored by central pressure where available
+  geom_sf(data = filter(segments_all, !is.na(Pressure_hPa)), aes(color = Pressure_hPa), linewidth = 1.3) +
+  
+  # Layer 3: Draw 3-hour Center Point Locations (colored where pressure is present)
+  geom_sf(data = filter(tracks_with_radii, !is.na(Pressure_hPa)), aes(color = Pressure_hPa), size = 1, alpha = 0.8) +
+  
+  # Add Jangamo point location marker
+  geom_sf(data = jangamo_point, color = "black", fill = "red", shape = 21, size = 2.5, stroke = 0.8) +
+  
+  # Add Jangamo point label
+  geom_text_repel(data = jangamo_point, 
+                  aes(x = st_coordinates(geometry)[,1], 
+                      y = st_coordinates(geometry)[,2], 
+                      label = "Jangamo/Guinjata bay"),
+                  color = "black", fontface = "bold", size = 2.8, 
+                  nudge_x = 0.8, nudge_y = -0.3, box.padding = 0.3) +
+  
+  # Map Framing
+  coord_sf(xlim = c(map_bounds["xmin"], map_bounds["xmax"]), 
+           ylim = c(map_bounds["ymin"], map_bounds["ymax"]), 
+           expand = FALSE) +
+  
+  # Facet chronologically by ordered NAME_YEAR factor
+  facet_wrap(~ NAME_YEAR) +
+  
+  # Continuous inverted magma scale for Central Pressure
+  scale_color_viridis_c(
+    name = "Central Pressure\n(hPa)", 
+    option = "magma", 
+    direction = -1
+  ) +
+  
+  # Styling & Themes
+  theme_minimal() +
+  labs(
+    #title = "Storm Tracks & Gale Wind Impact Zones (2010–2025)",
+    #subtitle = str_wrap("Track colored by central pressure | Grey baseline = track segments without pressure data | 100km site buffer zone in yellow"),
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme(
+    panel.background = element_rect(fill = "#edf7ff"),
+    panel.grid.major = element_line(color = "white", linewidth = 0.2),
+    plot.title = element_text(face = "bold", size = 14),
+    strip.text = element_text(face = "bold", size = 10),
+    strip.background = element_rect(fill = "#e0e0e0", color = NA),
+    panel.spacing.x = unit(0.9, "lines"),
+    panel.spacing.y = unit(0.5, "lines"),
+    axis.text.x = element_text(angle = 90, hjust = 0.5),
+    legend.position = "right"
+  )
+```
+
+```{r}
+library(lubridate)
+library(ggrepel)
+library(tidyverse)
+#mutate so that cyclone occurences are discrete and appear as one
+plot_data <- jangamo_cyclones_summary %>%
+  mutate(Occurrence = 1)
+
+#plot cyclone timeline
+cycloneoccurence_plot <- ggplot(plot_data, aes(x = First_Impact, y = Occurrence)) +
+  # Draw vertical line from y = 0 to y = 1 for each event date
+  geom_segment(aes(xend = First_Impact, yend = 0), color = "#1f78b4", linewidth = 0.2) +
+  ### Draw red vertical line for MHW 2025 at the start of February 2025 (NEEDS TO BE EDITED TO REFLECT ACTUAL DATE)
+  annotate("segment", 
+           x = as.Date("2025-02-01"), xend = as.Date("2025-02-01"), 
+           y = 0, yend = 1, 
+           color = "#e31a1c", linewidth = 0.2) +
+  annotate("segment", 
+           x = as.Date("2020-02-01"), xend = as.Date("2020-02-01"), 
+           y = 0, yend = 1, 
+           color = "#e31a1c", linewidth = 0.2) +
+  annotate("segment", 
+           x = as.Date("2021-03-15"), xend = as.Date("2021-03-15"), 
+           y = 0, yend = 1, 
+           color = "#e31a1c", linewidth = 0.2) +
+  ###add connecting label line
+  # annotate("segment", 
+  #          x = as.Date("2025-02-01"), xend = as.Date("2025-02-01"), 
+  #          y = 0, yend = 1.15, 
+  #          color = "#e31a1c", linewidth = 0.2) +
+  ### Add MHW label above the red spike
+  # annotate("text", 
+  #          x = as.Date("2025-02-01"), y = 1.2, 
+  #          label = "MHW 2025", 
+  #          color = "#e31a1c", fontface = "bold", size = 3.5) +
+  # Add storm labels above each spike
+  # geom_text_repel(aes(label = paste(NAME, year(First_Impact))), 
+  #                 nudge_y = 0.2, direction = "y", size = 3.5, fontface = "bold") +
+  # format date axis
+  scale_x_date(
+    limits = c(as.Date("2010-01-01"), as.Date("2026-01-01")),
+    date_breaks = "1 year",
+    date_labels = "%Y", expand = c(0, 0)
+  ) +
+  #posixct formatting commented out so faceting works better
+  # scale_x_datetime(
+  #   limits = c(as.POSIXct("2006-01-01"), as.POSIXct("2025-12-31")),
+  #   date_breaks = "1 year",
+  #   date_labels = "%Y"
+  # ) +
+  scale_y_continuous(limits = c(0, 1), breaks = c(0, 1), labels = c("0", "1"), expand = c(0, 0)) +
+  labs(
+    #title = "Disturbance Occurrence Timeline (2010–2025)",
+    #subtitle = "Blue lines = Cyclones | Red lines = Marine Heatwaves",
+    x = "Years",
+    y = "Disturbance Occurrence"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.line = element_line(linewidth = 0.8),
+    panel.grid.major.x = element_line(color = "grey90", linetype = "dashed")
+  )+ theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cycloneoccurence_plot
+```
+
+create a multipanel figure with other disturbance data using this with cyclone data and storm data. maybe plot monthly rainfall. cyclone occurence, maybe the cyclone path, broad and fine. faceted for ea ch disturbance type. maybe population density? secchi depth maybe?
+
+```{r}
+#| fig-width: 10
+#| fig-height: 7
+#| out-width: "100%"
+library(lubridate)
+library(tidyverse)
+
+# 1. Prepare benthic summary data (filtered >= 2016)
+target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge", "Rock")
+
+focused_summary_dateshift <- site_year_summary %>%
+  filter(
+    Category %in% target_groups,
+    Year >= 2016 & Year <= 2025
+  ) %>%
+  mutate(Survey_Date = as.Date(paste0(Year, "-04-01")))
+
+# 2. Filter disturbance data (filtered >= 2016)
+cyclone_lines <- jangamo_cyclones_summary %>%
+  filter(First_Impact >= as.Date("2016-01-01")) %>%
+  mutate(Type = "Cyclone")
+
+mhw_dates <- as.Date(c("2020-02-01", "2021-03-15", "2025-02-01"))
+mhw_data <- data.frame(First_Impact = mhw_dates, Type = "MHW") %>%
+  filter(First_Impact >= as.Date("2016-01-01"))
+
+# 3. Plot with well-defined publication-ready axes and error bar caps
+ggplot(focused_summary_dateshift, aes(x = Survey_Date, y = mean_cover, group = Category, color = Category)) +
+  # Add disturbance vertical lines across facets
+  geom_vline(data = cyclone_lines, aes(xintercept = First_Impact), 
+             color = "#e31a1c", linewidth = 0.4, alpha = 0.8) +
+  geom_vline(data = mhw_data, aes(xintercept = First_Impact), 
+             color = "#e31a1c", linewidth = 0.4, alpha = 0.8) +
+  # Error bars with wider horizontal caps (width = 180 days / ~6 months)
+  geom_errorbar(aes(ymin = pmax(0, mean_cover - se_cover), ymax = mean_cover + se_cover), 
+                width = 180, linewidth = 0.6, alpha = 0.9) +
+  # Trend lines and points on top
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  # Facet setup
+  facet_wrap(~ Category, scales = "free_y") +
+  # Restrict breaks to 2016, 2019, 2022, and 2025 with padding for edge caps
+  scale_x_date(
+    limits = c(as.Date("2015-09-01"), as.Date("2026-03-01")),
+    breaks = as.Date(c("2016-01-01", "2019-01-01", "2022-01-01", "2025-01-01")),
+    date_labels = "%Y",
+    expand = c(0.01, 0.01)
+  ) +
+  scale_y_continuous(
+    limits = c(0, NA),
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Benthic Functional Group Cover with Disturbance Timelines (2016–2025)",
+    subtitle = "Red vertical lines = Disturbances | Raw sample means utilised",
+    x = "Survey Year",
+    y = "Mean Substrate Cover (%)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 14),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.5),
+    axis.ticks.length = unit(4, "pt")
+  )
+```
+
+Species richness and diversity (Deprecated but run it as bio_data_long is needed for the PCA)
+
+```{r}
+
+library(tidyverse)
+
+# ------------------------------------------------------------------------------
+# 1. SETUP EXCLUSIONS AND CORE SITES
+# ------------------------------------------------------------------------------
+excluded_cols <- c(
+  "Sand", "Rock", "Rubble", "Clam Shell", "Seagrass", 
+  "Tape_TWS", "Shadow", "Dead coral", 
+  "Sclerophytum - bleached", "bleached cca",
+  "norm_mult", "obscured_raw", all_categories
+)
+
+core_sites <- c("Batfish", "Caves", "Devils Peak", "Pao")
+
+# ------------------------------------------------------------------------------
+# 2. PREPARE LONG-FORMAT BIOLOGICAL DATA
+# ------------------------------------------------------------------------------
+bio_data_long <- joined_cover_data %>%
+  filter(!Year %in% c(2018, 2026), Site_clean %in% core_sites) %>%# remember to comment out site clean in core sites if not focusing core sites
+  pivot_longer(
+    cols = where(is.numeric) & !any_of(c("Year", "Month_num", "norm_mult", "obscured_raw", "Image ID", "Points", "Visibility (m)" )),
+    names_to = "Taxon",
+    values_to = "Cover"
+  ) %>%
+  filter(!Taxon %in% excluded_cols, !is.na(Cover), Cover > 0)
+
+# ------------------------------------------------------------------------------
+# 3. BOX PLOT WITH JITTERED DIVES + MEAN DIAMONDS
+# ------------------------------------------------------------------------------
+dive_richness <- bio_data_long %>%
+  #group_by(Dive_ID, Site_clean, Year) %>%
+  group_by(Dive_ID, Year) %>%
+  summarise(richness = n_distinct(Taxon), .groups = "drop")
+
+ggplot(dive_richness, aes(x = factor(Year), y = richness)) +
+  geom_boxplot(outlier.shape = NA) +                      # Boxplot (shows median)
+  geom_jitter(width = 0.2, alpha = 0.4, size = 1.2) +    # Individual dive points
+  stat_summary(                                          # Plot MEAN as a diamond
+    fun = mean, 
+    geom = "point", 
+    shape = 18,                                          # 18 = diamond (use shape = 4 for 'X')
+    size = 3.5, 
+    color = "red"
+  ) +
+  #facet_wrap(~ Site_clean) +
+  labs(x = "Year", y = "Taxa Richness (Count / Dive)")
+
+# ------------------------------------------------------------------------------
+# 4. PLOT 2: WHITTAKER (RANK-ABUNDANCE) CURVE BY SITE
+# ------------------------------------------------------------------------------
+whittaker_data <- bio_data_long %>%
+  group_by(Taxon) %>%
+  #group_by(Site_clean, Taxon) %>%
+  summarise(mean_cover = mean(Cover, na.rm = TRUE), .groups = "drop_last") %>%
+  mutate(
+    relative_abundance = mean_cover / sum(mean_cover),
+    rank = min_rank(desc(relative_abundance))
+  )
+
+ggplot(whittaker_data, aes(x = rank, y = relative_abundance)) +
+  geom_line() +
+  geom_point() +
+  scale_y_log10() #+
+  #facet_wrap(~ Site_clean)
+
+# ------------------------------------------------------------------------------
+# 5. PLOT 3: MEAN SPECIES RICHNESS LINE PLOT WITH SE
+# ------------------------------------------------------------------------------
+richness_summary <- dive_richness %>%
+  #group_by(Site_clean, Year) %>%
+  group_by(Year) %>%
+  summarise(
+    n_dives       = n_distinct(Dive_ID),
+    mean_richness = mean(richness),
+    se_richness   = sd(richness) / sqrt(n_dives),
+    .groups       = "drop"
+  )
+
+#ggplot(richness_summary, aes(x = factor(Year), y = mean_richness, group = Site_clean)) +
+ggplot(richness_summary, aes(x = factor(Year), y = mean_richness, group = 1)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_richness - se_richness, ymax = mean_richness + se_richness), width = 0.2) +
+  #facet_wrap(~ Site_clean) +
+  labs(x = "Year", y = "Mean Taxa Richness (±1 SE)")
+```
+
+maybe shift away from looking at diversity for benthic, focus functional groups and do other plots. do pca focus on key groups, coral, whether to greoup fleshy with turf. look at how much space sponges occupy focus on them. in functional group bar chart, seperate the algae category into turf and macroalgae and cca
+
+rough pca
+
+```{r}
+#| fig-width: 7
+#| fig-height: 7
+#| out-width: "100%"
+library(tidyverse)
+library(vegan)
+
+# Filter out excluded years and isolate target sites
+pca_data <- bio_data_long %>%
+  filter(!Year %in% c(2018, 2026)) %>%
+  filter(Site_clean %in% c("Batfish", "Caves", "Devils Peak", "Pao"))
+
+# Pivot to wide format for vegan
+pca_wide <- pca_data %>%
+  group_by(Site_clean, Year, Taxon) %>%
+  summarise(cover = mean(Cover, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Taxon, values_from = cover, values_fill = 0)
+
+# Extract matrix and convert years to factor for plotting
+site_info <- pca_wide %>% 
+  select(Site_clean, Year) %>% 
+  mutate(Year = factor(Year))
+
+comm_matrix <- pca_wide %>% select(-Site_clean, -Year)
+
+# Hellinger transformation & PCA
+comm_hellinger <- decostand(comm_matrix, method = "hellinger")
+pca_fit <- rda(comm_hellinger)
+
+# Pull axis variance percentages
+var_pc1 <- round(summary(pca_fit)$cont$importance[2, 1] * 100, 1)
+var_pc2 <- round(summary(pca_fit)$cont$importance[2, 2] * 100, 1)
+
+# Get site-year point scores
+site_scores <- as.data.frame(scores(pca_fit, display = "sites")) %>%
+  bind_cols(site_info)
+
+# Get species vectors and select top drivers
+species_scores <- as.data.frame(scores(pca_fit, display = "species")) %>%
+  rownames_to_column(var = "Taxon") %>%
+  mutate(dist = sqrt(PC1^2 + PC2^2)) %>%
+  slice_max(dist, n = 12)
+
+# Plot ordination
+ggplot() +
+  geom_segment(data = species_scores, 
+               aes(x = 0, y = 0, xend = PC1, yend = PC2),
+               arrow = arrow(length = unit(0.2, "cm")), 
+               color = "grey30") +
+  geom_text(data = species_scores, 
+            aes(x = PC1 * 1.15, y = PC2 * 1.15, label = Taxon), 
+            size = 3.5, fontface = "bold") +
+  geom_point(data = site_scores, 
+             aes(x = PC1, y = PC2, color = Site_clean, shape = Year), 
+             size = 3) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank()) +
+  labs(
+    title = "Genus/Taxa-Level PCA Ordination",
+    subtitle = "Hellinger-transformed community matrix | Main target sites",
+    x = paste0("PC1 (", var_pc1, "% Variance)"),
+    y = paste0("PC2 (", var_pc2, "% Variance)"),
+    color = "Site",
+    shape = "Year"
+  )
+```
+
+with confidence ellipses\
+
+```{r}
+#| fig-width: 7
+#| fig-height: 7
+#| out-width: "100%"
+library(tidyverse)
+library(vegan)
+
+# Filter out excluded years and isolate target sites
+pca_data <- bio_data_long %>%
+  filter(!Year %in% c(2018, 2026)) %>%
+  filter(Site_clean %in% c("Batfish", "Caves", "Devils Peak", "Pao"))
+
+# Pivot to wide format for vegan
+pca_wide <- pca_data %>%
+  group_by(Site_clean, Year, Taxon) %>%
+  summarise(cover = mean(Cover, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Taxon, values_from = cover, values_fill = 0)
+
+# Extract matrix and convert years to factor for plotting
+site_info <- pca_wide %>% 
+  select(Site_clean, Year) %>% 
+  mutate(Year = factor(Year))
+
+comm_matrix <- pca_wide %>% select(-Site_clean, -Year)
+
+# Hellinger transformation & PCA
+comm_hellinger <- decostand(comm_matrix, method = "hellinger")
+pca_fit <- rda(comm_hellinger)
+
+# Pull axis variance percentages
+var_pc1 <- round(summary(pca_fit)$cont$importance[2, 1] * 100, 1)
+var_pc2 <- round(summary(pca_fit)$cont$importance[2, 2] * 100, 1)
+
+# Get site-year point scores
+site_scores <- as.data.frame(scores(pca_fit, display = "sites")) %>%
+  bind_cols(site_info)
+
+# Get species vectors and select top drivers
+species_scores <- as.data.frame(scores(pca_fit, display = "species")) %>%
+  rownames_to_column(var = "Taxon") %>%
+  mutate(dist = sqrt(PC1^2 + PC2^2)) %>%
+  slice_max(dist, n = 12)
+
+# Plot ordination with years as colors and sites as shapes
+ggplot() +
+  # 95% confidence ellipses grouped and colored by Year
+  stat_ellipse(data = site_scores, 
+               aes(x = PC1, y = PC2, color = Year, fill = Year),
+               type = "t", level = 0.95, geom = "polygon", alpha = 0.15, linewidth = 0.5) +
+  geom_segment(data = species_scores, 
+               aes(x = 0, y = 0, xend = PC1, yend = PC2),
+               arrow = arrow(length = unit(0.2, "cm")), 
+               color = "grey30") +
+  geom_text(data = species_scores, 
+            aes(x = PC1 * 1.15, y = PC2 * 1.15, label = Taxon), 
+            size = 3.5, fontface = "bold") +
+  geom_point(data = site_scores, 
+             aes(x = PC1, y = PC2, shape = Site_clean, color = Year), 
+             size = 3) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank()) +
+  labs(
+    #title = "Genus/Taxa-Level PCA Plot for Jangamo and Guinjata Bay from 2016-2025",
+    #subtitle = "Hellinger-transformed community matrix | 95% Year Confidence Ellipses",
+    x = paste0("PC1 (", var_pc1, "% Variance)"),
+    y = paste0("PC2 (", var_pc2, "% Variance)"),
+    color = "Year",
+    fill = "Year",
+    shape = "Site"
+  )
+```
+
+finalised pca below
+
+```{r}
+#| fig-width: 7
+#| fig-height: 7
+#| out-width: "100%"
+library(tidyverse)
+library(vegan)
+library(ggrepel)
+
+# Filter out excluded years, isolate target sites
+pca_data <- bio_data_long %>%
+  filter(!Year %in% c(2018, 2026)) %>%
+  filter(Site_clean %in% c("Batfish", "Caves", "Devils Peak", "Pao")) %>%
+  mutate(Taxon = if_else(Taxon == "Ceramium sp.", "Turf algae", Taxon))
+
+# Pivot to wide format for vegan (summing cover if both were present at the same site-year)
+pca_wide <- pca_data %>%
+  group_by(Site_clean, Year, Taxon) %>%
+  summarise(cover = sum(Cover, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Taxon, values_from = cover, values_fill = 0)
+
+# Extract matrix and convert years to factor for plotting
+site_info <- pca_wide %>% 
+  select(Site_clean, Year) %>% 
+  mutate(Year = factor(Year))
+
+comm_matrix <- pca_wide %>% select(-Site_clean, -Year)
+
+# Hellinger transformation & PCA
+comm_hellinger <- decostand(comm_matrix, method = "hellinger")
+pca_fit <- rda(comm_hellinger)
+
+# ==========================================
+# EXTRACT & EXPORT APPENDIX TABLES (CSV)
+# ==========================================
+
+# 1. Eigenvalues and Variance Explained Summary Table
+eigen_summary <- summary(pca_fit)$cont$importance
+eigen_df <- as.data.frame(t(eigen_summary)) %>%
+  rownames_to_column(var = "Axis") %>%
+  rename(
+    Eigenvalue = 2,
+    Proportion_Explained = 3,
+    Cumulative_Proportion = 4
+  )
+
+# 2. Full Species Loading Scores (Eigenvectors) Table sorted by distance from origin
+all_species_scores <- as.data.frame(scores(pca_fit, display = "species")) %>%
+  rownames_to_column(var = "Taxon") %>%
+  mutate(Vector_Length = sqrt(PC1^2 + PC2^2)) %>%
+  arrange(desc(Vector_Length))
+
+# Export tables to CSV format in your working directory
+write.csv(eigen_df, "pca_eigenvalues_summary.csv", row.names = FALSE)
+write.csv(all_species_scores, "pca_species_loading_scores.csv", row.names = FALSE)
+
+# Print confirmation to console
+print("Appendix CSV files successfully exported: 'pca_eigenvalues_summary.csv' & 'pca_species_loading_scores.csv'")
+
+# ==========================================
+# PLOTTING PIPELINE
+# ==========================================
+
+# Pull axis variance percentages for plot labels
+var_pc1 <- round(summary(pca_fit)$cont$importance[2, 1] * 100, 1)
+var_pc2 <- round(summary(pca_fit)$cont$importance[2, 2] * 100, 1)
+
+# Get site-year point scores
+site_scores <- as.data.frame(scores(pca_fit, display = "sites")) %>%
+  bind_cols(site_info)
+
+# Get species vectors and select top drivers for the plot
+species_scores <- as.data.frame(scores(pca_fit, display = "species")) %>%
+  rownames_to_column(var = "Taxon") %>%
+  mutate(dist = sqrt(PC1^2 + PC2^2)) %>%
+  slice_max(dist, n = 12)
+
+# Plot ordination with years as colors and sites as shapes
+ggplot() +
+  # 95% confidence ellipses grouped and colored by Year
+  stat_ellipse(data = site_scores, 
+               aes(x = PC1, y = PC2, color = Year, fill = Year),
+               type = "t", level = 0.95, geom = "polygon", alpha = 0.15, linewidth = 0.5) +
+  geom_segment(data = species_scores, 
+               aes(x = 0, y = 0, xend = PC1, yend = PC2),
+               arrow = arrow(length = unit(0.2, "cm")), 
+               color = "grey30") +
+  geom_text_repel(data = species_scores, 
+                  aes(x = PC1, y = PC2, label = Taxon), 
+                  size = 3.5, 
+                  fontface = "bold",
+                  box.padding = 0.4,
+                  point.padding = 0.2,
+                  max.overlaps = Inf) +
+  geom_point(data = site_scores, 
+             aes(x = PC1, y = PC2, shape = Site_clean, color = Year), 
+             size = 3) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank()) +
+  labs(
+    x = paste0("PC1 (", var_pc1, "% Variance)"),
+    y = paste0("PC2 (", var_pc2, "% Variance)"),
+    color = "Year",
+    fill = "Year",
+    shape = "Site"
+  )
+```
+
+disturbance plots faceted
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+#| out-width: "100%"
+library(patchwork)
+
+library(patchwork)
+
+# Stack all three time-series plots vertically
+#faceted_figure <- rainfall_plot / cycloneoccurence_plot / sst_plot
+faceted_figure <- sst_plot / cycloneoccurence_plot
+
+# Add overall title and A, B, C panel tags
+faceted_figure <- faceted_figure +
+  plot_annotation(
+    #title = "Disturbances in Jangamo Bay",
+    tag_levels = "A"
+  ) &
+  theme(plot.margin = margin(5, 5, 5, 5))
+
+# Display the combined plot
+faceted_figure
+```
+
+**add confidence ellipses for site and year for pca**
+
+maybe univariate on turf algae eaters
+
+collapse on site rather than regional cos clustering are at year level
+
+univariate- look at maybe categorical for years, preimposed bleaching for 2016 and post 2025 bleaching glm site as a random effect (figure whether bayesian or otherwise)
+
+things to do this week:
+
+**Increase cyclone search pre 2016, extend back by a decade so we can get an idea for how ecosystem may have been in the past. try and plot cyclone severity and impact zones/overlap( make the buffer intersect depend on impact zone instead)**
+
+fix 2016 annotations
+
+do bayesian univariate glmm looking at changes in cover of specific functional groups
+
+look at abundances in cliona there is a driver of cliona for caves 2016
+
+**facet plots on disturbances and facet cover plots,**
+
+shift focus away from biodiversity data
+
+Upload coral cover data to coralnet
+
+draft intro and methods and presentation
+
+forget about fish
+
+Meeting qs:
+
+ask how do i account for transects that have less than 11 replicates
+
+do i need to create a statistical test for the dhw data
+
+WORKING BAYESIAN GLMM
+
+```{r}
+# =============================================================================
+# 0. SETUP ENVIRONMENT & LIBRARIES
+# =============================================================================
+
+Sys.setenv(PATH = paste(
+  "C:/RBuildTools/4.5/usr/bin",
+  "C:/RBuildTools/4.5/x86_64-w64-mingw32.static.posix/bin",
+  Sys.getenv("PATH"),
+  sep = ";"
+))
+
+options(pkgbuild.has_build_tools = TRUE)
+
+library(cmdstanr)
+library(brms)
+library(bayesplot)
+library(tidybayes)
+library(emmeans)
+library(tidyverse)
+
+
+# =============================================================================
+# 1. PREPARE MODEL DATASET
+# =============================================================================
+
+target_years <- c(2016, 2019, 2022, 2025)
+
+bayes_benthic_df <- joined_cover_data %>%
+  filter(Year %in% target_years) %>%
+  mutate(
+    Year_fac = factor(Year),
+    Site_fac = factor(Site_clean),
+    Dive_fac = factor(Dive_ID)
+  )
+
+
+# =============================================================================
+# 2. REUSABLE BAYESIAN GLMM FUNCTION
+# =============================================================================
+
+run_benthic_bayes_year_glmm <- function(data, 
+                                        target_category, 
+                                        family = zero_inflated_beta(),
+                                        cores = 4,
+                                        chains = 4,
+                                        iter = 3000,
+                                        warmup = 1000) {
+  
+  message(paste0(">>> Running Year-Based Bayesian GLMM for Category: ", target_category))
+  
+  df_sub <- data %>%
+    pivot_longer(
+      cols = all_of(all_categories),
+      names_to = "Category",
+      values_to = "Cover_Pct"
+    ) %>%
+    filter(Category == target_category) %>%
+    group_by(Dive_ID, Site_clean, Year) %>%
+    summarise(Cover_Pct = mean(Cover_Pct, na.rm = TRUE), .groups = "drop") %>%
+    mutate(
+      Cover_Prop = Cover_Pct / 100,
+      Year_fac   = factor(Year),
+      Site_fac   = factor(Site_clean)
+    ) %>%
+    filter(!is.na(Cover_Prop))
+  
+  model_formula <- bf(
+    Cover_Prop ~ Year_fac + (1 | Site_fac)
+  )
+  
+  fit <- brm(
+    formula = model_formula,
+    data = df_sub,
+    family = family,
+    backend = "cmdstanr",
+    chains = chains,
+    cores = cores,
+    iter = iter,
+    warmup = warmup,
+    control = list(adapt_delta = 0.95, max_treedepth = 12),
+    seed = 42
+  )
+  
+  return(fit)
+}
+
+
+# =============================================================================
+# 3. DIAGNOSTICS & MODEL FIT EVALUATION
+# =============================================================================
+
+# evaluate_model_fit <- function(model_fit) {
+#   message("\n--- Running Model Diagnostics & PPC ---")
+#   
+#   # Print summary table (Rhat, ESS)
+#   fit_summary <- summary(model_fit)
+#   print(fit_summary)
+#   
+#   # Posterior Predictive Checks
+#   p1 <- pp_check(model_fit, ndraws = 50) + 
+#     ggtitle("PPC: Observed vs Simulated Density")
+#   
+#   p2 <- pp_check(model_fit, type = "stat_grouped", group = "Year_fac", stat = "mean") +
+#     ggtitle("PPC: Grouped Mean Cover by Survey Year")
+#   
+#   print(p1)
+#   print(p2)
+#   
+#   # Leave-One-Out Cross-Validation
+#   message("\n--- Computing LOO-CV (Pareto k Diagnostics) ---")
+#   loo_res <- loo(model_fit, save_psis = TRUE)
+#   print(loo_res)
+#   
+#   plot(loo_res, main = "PSIS-LOO Pareto k Diagnostics")
+#   
+#   return(loo_res)
+# }
+evaluate_model_fit <- function(model_fit, category_name = "Benthic Category") {
+  message(paste0("\n--- Running Model Diagnostics & PPC: ", category_name, " ---"))
+  
+  # Print summary table (Rhat, ESS)
+  fit_summary <- summary(model_fit)
+  print(fit_summary)
+  
+  # Posterior Predictive Checks
+  p1 <- pp_check(model_fit, ndraws = 50) #+ 
+    #ggtitle(paste0("PPC: Observed vs Simulated Density — ", category_name))
+  
+  p2 <- pp_check(model_fit, type = "stat_grouped", group = "Year_fac", stat = "mean") #+
+    #ggtitle(paste0("PPC: Grouped Mean Cover by Survey Year — ", category_name))
+  
+  print(p1)
+  print(p2)
+  
+  # Leave-One-Out Cross-Validation
+  message("\n--- Computing LOO-CV (Pareto k Diagnostics) ---")
+  loo_res <- loo(model_fit, save_psis = TRUE)
+  print(loo_res)
+  
+  plot(loo_res, main = paste0())#"PSIS-LOO Pareto k Diagnostics — ", category_name))
+  
+  return(loo_res)
+}
+
+# =============================================================================
+# 4. POSTERIOR COVER EXTRACTION & TRAJECTORY PLOTTING
+# =============================================================================
+
+# Extract Mean/Median Cover (%) & 95% CIs per Year
+get_year_posterior_summary <- function(model_fit, target_years) {
+  tibble(Year = target_years) %>%
+    mutate(Year_fac = factor(Year)) %>%
+    add_epred_draws(model_fit, re_formula = NA) %>%
+    mutate(Cover_Pct = .epred * 100) %>%
+    group_by(Year) %>%
+    summarise(
+      Mean_Cover_Pct = round(mean(Cover_Pct), 2),
+      Median_Cover   = round(median(Cover_Pct), 2),
+      Lower_95_CI    = round(quantile(Cover_Pct, 0.025), 2),
+      Upper_95_CI    = round(quantile(Cover_Pct, 0.975), 2)
+    )
+}
+
+# Plot Trajectory Across Years
+# plot_year_trajectory <- function(model_fit, category_name, target_years, fill_color = "darkseagreen3") {
+#   tibble(Year = target_years) %>%
+#     mutate(Year_fac = factor(Year)) %>%
+#     add_epred_draws(model_fit, re_formula = NA) %>%
+#     mutate(Cover_Pct = .epred * 100) %>%
+#     ggplot(aes(x = factor(Year), y = Cover_Pct)) +
+#     stat_eye(fill = fill_color, alpha = 0.8, .width = c(0.66, 0.95)) +
+#     labs(
+#       title = paste0(category_name),
+#       x = "Survey Year",
+#       y = "Substrate Cover (%)"
+#     ) +
+#     theme_minimal(base_size = 14)+
+#   theme(plot.title = element_text(hjust = 0.5))
+# }
+plot_year_trajectory <- function(model_fit, category_name, target_years, fill_color = "darkseagreen3") {
+  tibble(Year = target_years) %>%
+    mutate(Year_fac = factor(Year)) %>%
+    add_epred_draws(model_fit, re_formula = NA) %>%
+    mutate(Cover_Pct = .epred * 100) %>%
+    ggplot(aes(x = Year_fac, y = Cover_Pct)) +
+    stat_eye(fill = fill_color, alpha = 0.8, .width = c(0.66, 0.95)) +
+    scale_y_continuous(
+      limits = c(0, NA),
+      expand = expansion(mult = c(0, 0.1))
+    ) +
+    labs(
+      title = category_name,
+      x = "Survey Year",
+      y = "Substrate Cover (%)"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.ticks.length = unit(4, "pt"),
+      panel.grid.minor = element_blank()
+    )
+}
+# plot_year_trajectory <- function(model_fit, category_name, target_years, fill_color = "darkseagreen3") {
+#   tibble(Year = target_years) %>%
+#     add_epred_draws(model_fit, re_formula = NA) %>%
+#     mutate(Cover_Pct = .epred * 100) %>%
+#     ggplot(aes(x = Year, y = Cover_Pct, group = Year)) +
+#     stat_eye(fill = fill_color, alpha = 0.8, .width = c(0.66, 0.95)) +
+#     scale_x_continuous(
+#       breaks = c(2016, 2019, 2022, 2025),
+#       limits = c(2015, 2026)
+#     ) +
+#     labs(
+#       title = category_name,
+#       x = "Survey Year",
+#       y = "Substrate Cover (%)"
+#     ) +
+#     theme_minimal(base_size = 12) +
+#     theme(
+#       plot.title = element_text(hjust = 0.5, face = "bold"),
+#       axis.text.x = element_text(angle = 45, hjust = 1)
+#     )
+# }
+# plot_year_trajectory <- function(model_fit, category_name, target_years, fill_color = "darkseagreen3") {
+#   tibble(Year = target_years) %>%
+#     add_epred_draws(model_fit, re_formula = NA) %>%
+#     mutate(Cover_Pct = .epred * 100) %>%
+#     ggplot(aes(x = Year, y = Cover_Pct, group = Year)) +
+#     stat_eye(fill = fill_color, alpha = 0.8, .width = c(0.66, 0.95)) +
+#     scale_x_continuous(
+#       breaks = c(2016, 2019, 2022, 2025),
+#       limits = c(2015.2, 2025.8),
+#       expand = c(0, 0)
+#     ) +
+#     scale_y_continuous(
+#       limits = c(0, NA),
+#       expand = expansion(mult = c(0, 0.1))
+#     ) +
+#     labs(
+#       title = category_name,
+#       x = "Survey Year",
+#       y = "Substrate Cover (%)"
+#     ) +
+#     theme_minimal(base_size = 12) +
+#     theme(
+#       plot.title = element_text(hjust = 0.5, face = "bold"),
+#       axis.text.x = element_text(angle = 45, hjust = 1),
+#       axis.line = element_line(color = "black", linewidth = 0.5),
+#       axis.ticks = element_line(color = "black", linewidth = 0.5),
+#       panel.grid.minor = element_blank()
+#     )
+# }
+# =============================================================================
+# 5. POST-HOC PAIRWISE CONTRASTS (emmeans)
+# =============================================================================
+
+run_posthoc_contrasts <- function(model_fit, category_name) {
+  message(paste0("\n========================================================"))
+  message(paste0(" POST-HOC PAIRWISE CONTRASTS: ", category_name))
+  message(paste0("========================================================\n"))
+  
+  # Marginal Means on Response Scale (%)
+  emm_year <- emmeans(
+    model_fit, 
+    ~ Year_fac, 
+    type = "response",
+    re_formula = NA
+  )
+  
+  message("--- Marginal Posterior Means per Year (% Cover) ---")
+  print(summary(emm_year))
+  
+  # Pairwise Contrasts
+  year_pairs <- pairs(emm_year, reverse = TRUE)
+  
+  message("\n--- Pairwise Year Comparisons (Posterior Odds Ratios) ---")
+  print(summary(year_pairs))
+  
+  # Tidy Difference Summary
+  contrast_draws <- gather_emmeans_draws(year_pairs) %>%
+    group_by(contrast) %>%
+    summarise(
+      Mean_Diff    = round(mean(.value), 4),
+      Median_Diff  = round(median(.value), 4),
+      Lower_95_CI  = round(quantile(.value, 0.025), 4),
+      Upper_95_CI  = round(quantile(.value, 0.975), 4),
+      Prob_Greater = round(mean(.value > 0), 4),
+      Sig_Shift    = ifelse(sign(Lower_95_CI) == sign(Upper_95_CI), "YES", "NO")
+    )
+  
+  message("\n--- Tidy Posterior Difference Summary ---")
+  print(contrast_draws)
+  
+  return(list(
+    emm = emm_year,
+    pairs = year_pairs,
+    summary_table = contrast_draws
+  ))
+}
+
+
+# =============================================================================
+# 6. COMPLETE WORKFLOW EXECUTION
+# =============================================================================
+
+# Step 1: Fit Model
+fit_turf_algae_year <- run_benthic_bayes_year_glmm(
+  data = bayes_benthic_df,
+  target_category = "Turf Algae",
+  family = zero_inflated_beta(),
+  cores = 4
+)
+
+# Step 2: Evaluate Model Fit Diagnostics (PPC & LOO)
+loo_turf_algae_year <- evaluate_model_fit(fit_turf_algae_year, "Turf Algae")
+
+# Step 3: Extract Posterior Cover (%) & Generate Trajectory Plot
+turf_cover_summary <- get_year_posterior_summary(fit_turf_algae_year, target_years)
+print(turf_cover_summary)
+
+p_turf <- plot_year_trajectory(fit_turf_algae_year, "Turf Algae", target_years)
+print(p_turf)
+
+# Step 4: Run Post-Hoc Pairwise Contrasts
+turf_posthoc <- run_posthoc_contrasts(fit_turf_algae_year, "Turf Algae")
+
+# Correct: extract the summary_table data frame from the list first
+turf_thesis_contrast_table <- turf_posthoc$summary_table %>%
+  mutate(
+    `Median Diff [95% CI]` = sprintf("%.2f [%.2f, %.2f]", Median_Diff, Lower_95_CI, Upper_95_CI),
+    `Mean Diff` = sprintf("%.2f", Mean_Diff),
+    `Significant Shift` = ifelse(Sig_Shift == "YES", "Yes", "No (Stable)")
+  ) %>%
+  select(contrast, `Median Diff [95% CI]`, `Mean Diff`, Prob_Greater, `Significant Shift`)
+
+# Print table
+knitr::kable(
+  turf_thesis_contrast_table, 
+  format = "markdown", 
+  caption = "Pairwise Contrasts for Algal Turfs (Post-Hoc GLMM Estimates)"
+)
+# Save to CSV file
+write_csv(turf_thesis_contrast_table, "turf_pairwise_contrasts_summary.csv")
+```
+
+```{r}
+#target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge")
+
+#--- Fit Model for Hard Coral ---
+fit_hard_coral_year <- run_benthic_bayes_year_glmm(
+  data = bayes_benthic_df,
+  target_category = "Hard Coral",
+  family = zero_inflated_beta(),
+  cores = 4
+)
+# Step 2: Evaluate Model Fit Diagnostics (PPC & LOO)
+loo_hard_coral_year <- evaluate_model_fit(fit_hard_coral_year, "Hard Coral")
+
+# Step 3: Extract Posterior Cover (%) & Generate Trajectory Plot
+hard_coral_cover_summary <- get_year_posterior_summary(fit_hard_coral_year, target_years)
+print(hard_coral_cover_summary)
+
+p_hc <- plot_year_trajectory(fit_hard_coral_year, "Hard Coral", target_years)
+print(p_hc)
+
+# --- Run Post-Hoc Contrasts ---
+hardcoral_posthoc <- run_posthoc_contrasts(fit_hard_coral_year, "Hard Coral")
+
+# Correct: extract the summary_table data frame from the list first
+hardcoral_thesis_contrast_table <- hardcoral_posthoc$summary_table %>%
+  mutate(
+    `Median Diff [95% CI]` = sprintf("%.2f [%.2f, %.2f]", Median_Diff, Lower_95_CI, Upper_95_CI),
+    `Mean Diff` = sprintf("%.2f", Mean_Diff),
+    `Significant Shift` = ifelse(Sig_Shift == "YES", "Yes", "No (Stable)")
+  ) %>%
+  select(contrast, `Median Diff [95% CI]`, `Mean Diff`, Prob_Greater, `Significant Shift`)
+
+# Print table
+knitr::kable(
+  hardcoral_thesis_contrast_table, 
+  format = "markdown", 
+  caption = "Pairwise Contrasts for Hard Coral (Post-Hoc GLMM Estimates)"
+)
+# Save to CSV file
+write_csv(hardcoral_thesis_contrast_table, "hardcoral_pairwise_contrasts_summary.csv")
+```
+
+```{r}
+#target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge")
+
+#--- Fit Model for Soft Coral ---
+fit_soft_coral_year <- run_benthic_bayes_year_glmm(
+  data = bayes_benthic_df,
+  target_category = "Soft Coral",
+  family = zero_inflated_beta(),
+  cores = 4
+)
+# Step 2: Evaluate Model Fit Diagnostics (PPC & LOO)
+loo_soft_coral_year <- evaluate_model_fit(fit_soft_coral_year, "Soft Coral")
+
+# Step 3: Extract Posterior Cover (%) & Generate Trajectory Plot
+soft_coral_cover_summary <- get_year_posterior_summary(fit_soft_coral_year, target_years)
+print(soft_coral_cover_summary)
+
+p_sc <- plot_year_trajectory(fit_soft_coral_year, "Soft Coral", target_years)
+print(p_sc)
+
+# --- Run Post-Hoc Contrasts ---
+softcoral_posthoc <- run_posthoc_contrasts(fit_soft_coral_year, "Soft Coral")
+
+# Correct: extract the summary_table data frame from the list first
+softcoral_thesis_contrast_table <- softcoral_posthoc$summary_table %>%
+  mutate(
+    `Median Diff [95% CI]` = sprintf("%.2f [%.2f, %.2f]", Median_Diff, Lower_95_CI, Upper_95_CI),
+    `Mean Diff` = sprintf("%.2f", Mean_Diff),
+    `Significant Shift` = ifelse(Sig_Shift == "YES", "Yes", "No (Stable)")
+  ) %>%
+  select(contrast, `Median Diff [95% CI]`, `Mean Diff`, Prob_Greater, `Significant Shift`)
+
+# Print table
+knitr::kable(
+  softcoral_thesis_contrast_table, 
+  format = "markdown", 
+  caption = "Pairwise Contrasts for Soft Coral (Post-Hoc GLMM Estimates)"
+)
+# Save to CSV file
+write_csv(softcoral_thesis_contrast_table, "softcoral_pairwise_contrasts_summary.csv")
+```
+
+```{r}
+#target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge")
+
+#--- Fit Model for MAL ---
+fit_mal_year <- run_benthic_bayes_year_glmm(
+  data = bayes_benthic_df,
+  target_category = "Macroalgae",
+  family = zero_inflated_beta(),
+  cores = 4
+)
+# Step 2: Evaluate Model Fit Diagnostics (PPC & LOO)
+loo_mal_year <- evaluate_model_fit(fit_mal_year, "Macroalgae")
+
+# Step 3: Extract Posterior Cover (%) & Generate Trajectory Plot
+mal_cover_summary <- get_year_posterior_summary(fit_mal_year, target_years)
+print(mal_cover_summary)
+
+p_mal <- plot_year_trajectory(fit_mal_year, "Macroalgae", target_years)
+print(p_mal)
+
+# --- Run Post-Hoc Contrasts ---
+mal_posthoc <- run_posthoc_contrasts(fit_mal_year, "Macroalgae")
+
+# Correct: extract the summary_table data frame from the list first
+mal_thesis_contrast_table <- mal_posthoc$summary_table %>%
+  mutate(
+    `Median Diff [95% CI]` = sprintf("%.2f [%.2f, %.2f]", Median_Diff, Lower_95_CI, Upper_95_CI),
+    `Mean Diff` = sprintf("%.2f", Mean_Diff),
+    `Significant Shift` = ifelse(Sig_Shift == "YES", "Yes", "No (Stable)")
+  ) %>%
+  select(contrast, `Median Diff [95% CI]`, `Mean Diff`, Prob_Greater, `Significant Shift`)
+
+# Print table
+knitr::kable(
+  mal_thesis_contrast_table, 
+  format = "markdown", 
+  caption = "Pairwise Contrasts for Macroalgae (Post-Hoc GLMM Estimates)"
+)
+# Save to CSV file
+write_csv(mal_thesis_contrast_table, "mal_pairwise_contrasts_summary.csv")
+```
+
+```{r}
+#target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge")
+
+#--- Fit Model for Sponge ---
+fit_sponge_year <- run_benthic_bayes_year_glmm(
+  data = bayes_benthic_df,
+  target_category = "Sponge",
+  family = zero_inflated_beta(),
+  cores = 4
+)
+# Step 2: Evaluate Model Fit Diagnostics (PPC & LOO)
+loo_sponge_year <- evaluate_model_fit(fit_sponge_year, "Sponge")
+
+# Step 3: Extract Posterior Cover (%) & Generate Trajectory Plot
+sponge_cover_summary <- get_year_posterior_summary(fit_sponge_year, target_years)
+print(sponge_cover_summary)
+
+p_sponge <- plot_year_trajectory(fit_sponge_year, "Sponge", target_years)
+print(p_sponge)
+
+# --- Run Post-Hoc Contrasts ---
+sponge_posthoc <- run_posthoc_contrasts(fit_sponge_year, "Sponge")
+
+library(tidyverse)
+library(knitr)
+
+# Correct: extract the summary_table data frame from the list first
+sp_thesis_contrast_table <- sponge_posthoc$summary_table %>%
+  mutate(
+    `Median Diff [95% CI]` = sprintf("%.2f [%.2f, %.2f]", Median_Diff, Lower_95_CI, Upper_95_CI),
+    `Mean Diff` = sprintf("%.2f", Mean_Diff),
+    `Significant Shift` = ifelse(Sig_Shift == "YES", "Yes", "No (Stable)")
+  ) %>%
+  select(contrast, `Median Diff [95% CI]`, `Mean Diff`, Prob_Greater, `Significant Shift`)
+
+# Print table
+knitr::kable(
+  sp_thesis_contrast_table, 
+  format = "markdown", 
+  caption = "Pairwise Contrasts for Sponge (Post-Hoc GLMM Estimates)"
+)
+# Save to CSV file
+write_csv(sp_thesis_contrast_table, "sp_pairwise_contrasts_summary.csv")
+```
+
+```{r}
+#target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge")
+
+#--- Fit Model for CCA ---
+fit_cca_year <- run_benthic_bayes_year_glmm(
+  data = bayes_benthic_df,
+  target_category = "Crustose Coralline Algae",
+  family = zero_inflated_beta(),
+  cores = 4
+)
+# Step 2: Evaluate Model Fit Diagnostics (PPC & LOO)
+loo_cca_year <- evaluate_model_fit(fit_cca_year, "CCA")
+
+# Step 3: Extract Posterior Cover (%) & Generate Trajectory Plot
+cca_cover_summary <- get_year_posterior_summary(fit_cca_year, target_years)
+print(cca_cover_summary)
+
+p_cca <- plot_year_trajectory(fit_cca_year, "Crustose Coralline Algae", target_years)
+print(p_cca)
+
+# --- Run Post-Hoc Contrasts ---
+cca_posthoc <- run_posthoc_contrasts(fit_cca_year, "Crustose Coralline Algae")
+
+library(tidyverse)
+library(knitr)
+
+# Correct: extract the summary_table data frame from the list first
+cca_thesis_contrast_table <- cca_posthoc$summary_table %>%
+  mutate(
+    `Median Diff [95% CI]` = sprintf("%.2f [%.2f, %.2f]", Median_Diff, Lower_95_CI, Upper_95_CI),
+    `Mean Diff` = sprintf("%.2f", Mean_Diff),
+    `Significant Shift` = ifelse(Sig_Shift == "YES", "Yes", "No (Stable)")
+  ) %>%
+  select(contrast, `Median Diff [95% CI]`, `Mean Diff`, Prob_Greater, `Significant Shift`)
+
+# Print table
+knitr::kable(
+  cca_thesis_contrast_table, 
+  format = "markdown", 
+  caption = "Pairwise Contrasts for Crustose Coralline Algae Cover (Post-Hoc GLMM Estimates)"
+)
+# Save to CSV file
+write_csv(cca_thesis_contrast_table, "cca_pairwise_contrasts_summary.csv")
+```
+
+```{r}
+#target_groups <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge")
+
+#--- Fit Model for Rock ---
+fit_rock_year <- run_benthic_bayes_year_glmm(
+  data = bayes_benthic_df,
+  target_category = "Rock",
+  family = zero_inflated_beta(),
+  cores = 4
+)
+# Step 2: Evaluate Model Fit Diagnostics (PPC & LOO)
+loo_rock_year <- evaluate_model_fit(fit_rock_year, "Bare Rock")
+
+# Step 3: Extract Posterior Cover (%) & Generate Trajectory Plot
+rock_cover_summary <- get_year_posterior_summary(fit_rock_year, target_years)
+print(rock_cover_summary)
+
+p_rock <- plot_year_trajectory(fit_rock_year, "Bare Rock", target_years)
+print(p_rock)
+
+# --- Run Post-Hoc Contrasts ---
+rock_posthoc <- run_posthoc_contrasts(fit_rock_year, "Rock")
+
+# Correct: extract the summary_table data frame from the list first
+rock_thesis_contrast_table <- rock_posthoc$summary_table %>%
+  mutate(
+    `Median Diff [95% CI]` = sprintf("%.2f [%.2f, %.2f]", Median_Diff, Lower_95_CI, Upper_95_CI),
+    `Mean Diff` = sprintf("%.2f", Mean_Diff),
+    `Significant Shift` = ifelse(Sig_Shift == "YES", "Yes", "No (Stable)")
+  ) %>%
+  select(contrast, `Median Diff [95% CI]`, `Mean Diff`, Prob_Greater, `Significant Shift`)
+
+# Print table
+knitr::kable(
+  rock_thesis_contrast_table, 
+  format = "markdown", 
+  caption = "Pairwise Contrasts for Bare Rock (Post-Hoc GLMM Estimates)"
+)
+# Save to CSV file
+write_csv(rock_thesis_contrast_table, "rock_pairwise_contrasts_summary.csv")
+```
+
+FOR THE MEAN COVER PLOTS, ADD THE DISTURBANCE DATES IN THE TIMELINE
+
+TALK MORE ABOUT TURF ALGAE IN INTRO
+
+THINK ABOUT UR MAIN FINDINGS WHEN WRITING INTRO:
+
+JANGAMO REEFS HAVE BEEN PERSISTENTLY ALGAL DOMINANT FROM 2016 WITH NO SHIFT WITHIN OUR STUDY PERIOD + ESCALATING DISTURBANCE REGIME
+
+secondary plot function with year shift to the right to reflect sampling period and plot changes (NOT NECESSARY BUT FUNCTION AFTER IS)
+
+```{r}
+plot_year_trajectory <- function(model_fit, category_name, target_years, fill_color = "darkseagreen3") {
+  tibble(Year = target_years) %>%
+    mutate(Year_fac = factor(Year)) %>%
+    add_epred_draws(model_fit, re_formula = NA) %>%
+    mutate(Cover_Pct = .epred * 100) %>%
+    ggplot(aes(x = Year_fac, y = Cover_Pct)) +
+    stat_eye(
+      fill = fill_color, 
+      alpha = 0.8, 
+      .width = c(0.66, 0.95),
+      position = position_nudge(x = 0.111)
+    ) +
+    scale_y_continuous(
+      limits = c(0, NA),
+      expand = expansion(mult = c(0, 0.1))
+    ) +
+    labs(
+      title = category_name,
+      x = "Survey Year",
+      y = "Substrate Cover (%)"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.ticks.length = unit(4, "pt"),
+      panel.grid.minor = element_blank()
+    )
+}
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+#| out-width: "100%"
+library(patchwork)
+ 
+# 1. Generate your individual plots normally
+p_cca <- plot_year_trajectory(fit_cca_year, "Crustose Coralline Algae", target_years = c(2016, 2019, 2022, 2025), fill_color = "lightcoral")
+p_hc  <- plot_year_trajectory(fit_hard_coral_year, "Hard Coral", target_years = c(2016, 2019, 2022, 2025), fill_color = "darkgoldenrod2")
+p_mal <- plot_year_trajectory(fit_mal_year, "Macroalgae", target_years = c(2016, 2019, 2022, 2025), fill_color = "forestgreen")
+p_sc  <- plot_year_trajectory(fit_soft_coral_year, "Soft Coral", target_years = c(2016, 2019, 2022, 2025), fill_color = "lightseagreen")
+p_sponge <- plot_year_trajectory(fit_sponge_year, "Sponge", target_years = c(2016, 2019, 2022, 2025), fill_color = "cornflowerblue")
+p_turf <- plot_year_trajectory(fit_turf_algae_year, "Turf Algae", target_years = c(2016, 2019, 2022, 2025), fill_color = "limegreen")
+p_rock <- plot_year_trajectory(fit_rock_year, "Bare Rock", target_years = c(2016, 2019, 2022, 2025), fill_color = "grey")
+# 2. Combine using wrap_plots and axes = "collect" for publication-ready centered axes
+master_posterior_plot <- wrap_plots(
+  p_cca, p_hc, p_mal,
+  p_sc, p_sponge, p_turf,
+  p_rock,
+  ncol = 3
+) +
+  plot_layout(
+    axes = "collect", 
+    guides = "collect"
+  ) +
+  plot_annotation(
+    title = "Posterior Expected Benthic Cover with Disturbance Timelines (2016–2025)",
+    subtitle = "Bayesian GLMM posterior distributions | Red vertical lines = Disturbances",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5)
+    )
+  )
+
+
+master_posterior_plot
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+#| out-width: "100%"
+library(tidyverse)
+library(patchwork)
+library(tidybayes)
+library(ggdist)
+
+# 1. Define and filter custom disturbances and cyclone dates within 2016–2025
+custom_disturbances <- as.Date(c("2020-02-01", "2021-03-15", "2025-02-01"))
+custom_disturbances <- custom_disturbances[
+  custom_disturbances >= as.Date("2016-01-01") & 
+    custom_disturbances <= as.Date("2025-12-31")
+]
+
+cyclone_dates <- if (exists("jangamo_cyclones_summary") && "First_Impact" %in% names(jangamo_cyclones_summary)) {
+  as.Date(jangamo_cyclones_summary$First_Impact)
+} else {
+  as.Date(character(0))
+}
+
+cyclone_dates <- cyclone_dates[
+  cyclone_dates >= as.Date("2016-01-01") & 
+    cyclone_dates <= as.Date("2025-12-31")
+]
+
+# 2. Plotting function updated to accept separate cyclone and custom disturbance dates
+plot_year_trajectory <- function(model_fit, category_name, target_years, fill_color = "darkseagreen3", cyclone_dates = as.Date(character(0)), custom_dates = as.Date(character(0))) {
+  
+  # Helper function to map calendar dates to discrete factor axis positions (1, 2, 3, 4...)
+  date_to_coord <- function(dt) {
+    if(is.na(dt)) return(NA)
+    d <- as.Date(dt)
+    yr <- as.numeric(format(d, "%Y"))
+    mo <- as.numeric(format(d, "%m"))
+    dy <- as.numeric(format(d, "%d"))
+    dec_yr <- yr + (mo - 1)/12 + (dy - 1)/365.25
+    
+    for(i in seq_along(target_years)) {
+      if(i < length(target_years)) {
+        start_yr <- target_years[i]
+        end_yr <- target_years[i+1]
+        if(dec_yr >= start_yr && dec_yr <= end_yr) {
+          return(i + (dec_yr - start_yr) / (end_yr - start_yr))
+        }
+      }
+    }
+    if(dec_yr < target_years[1]) {
+      return(1 + (dec_yr - target_years[1]) / 3)
+    } else {
+      return(length(target_years) + (dec_yr - tail(target_years, 1)) / 3)
+    }
+  }
+  
+  x_intercepts_cyclones <- sapply(cyclone_dates, date_to_coord)
+  x_intercepts_custom <- sapply(custom_dates, date_to_coord)
+  
+  tibble(Year = target_years) %>%
+    mutate(Year_fac = factor(Year)) %>%
+    add_epred_draws(model_fit, re_formula = NA) %>%
+    mutate(Cover_Pct = .epred * 100) %>%
+    ggplot(aes(x = Year_fac, y = Cover_Pct)) +
+    # Cyclonic events in blue
+    geom_vline(xintercept = x_intercepts_cyclones, color = "blue", linewidth = 0.4, alpha = 0.7, na.rm = TRUE) +
+    # Custom disturbances in red
+    geom_vline(xintercept = x_intercepts_custom, color = "red", linewidth = 0.4, alpha = 0.7, na.rm = TRUE) +
+    stat_eye(
+      fill = fill_color, 
+      alpha = 0.8, 
+      .width = c(0.66, 0.95),
+      position = position_nudge(x = 0.15) # Nudge violins 4 months right
+    ) +
+    scale_y_continuous(
+      limits = c(0, NA),
+      expand = expansion(mult = c(0, 0.1))
+    ) +
+    coord_cartesian(xlim = c(0.8, 4.6), clip = "off") +
+    labs(
+      title = category_name,
+      x = "Survey Year",
+      y = "Substrate Cover (%)"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.ticks.length = unit(4, "pt"),
+      panel.grid.minor = element_blank()
+    )
+}
+
+# 3. Generate individual plots passing both cyclone and custom dates separately
+p_cca <- plot_year_trajectory(fit_cca_year, "Crustose Coralline Algae", c(2016, 2019, 2022, 2025), "lightcoral", cyclone_dates, custom_disturbances)
+p_hc  <- plot_year_trajectory(fit_hard_coral_year, "Hard Coral", c(2016, 2019, 2022, 2025), "darkgoldenrod2", cyclone_dates, custom_disturbances)
+p_mal <- plot_year_trajectory(fit_mal_year, "Macroalgae", c(2016, 2019, 2022, 2025), "forestgreen", cyclone_dates, custom_disturbances)
+p_sc  <- plot_year_trajectory(fit_soft_coral_year, "Soft Coral", c(2016, 2019, 2022, 2025), "lightseagreen", cyclone_dates, custom_disturbances)
+p_sponge <- plot_year_trajectory(fit_sponge_year, "Sponge", c(2016, 2019, 2022, 2025), "cornflowerblue", cyclone_dates, custom_disturbances)
+p_turf <- plot_year_trajectory(fit_turf_algae_year, "Turf Algae", c(2016, 2019, 2022, 2025), "limegreen", cyclone_dates, custom_disturbances)
+p_rock <- plot_year_trajectory(fit_rock_year, "Bare Rock", c(2016, 2019, 2022, 2025), "grey", cyclone_dates, custom_disturbances)
+
+# 4. Combine using patchwork
+master_posterior_plot <- wrap_plots(
+  p_cca, p_hc, p_mal,
+  p_sc, p_sponge, p_turf,
+  p_rock,
+  ncol = 3
+) +
+  plot_layout(
+    axes = "collect", 
+    guides = "collect"
+  )
+
+master_posterior_plot
+```
+
+code with PERMANOVA
+
+```{r}
+library(vegan)
+library(tidyverse)
+
+# Define your main benthic functional categories
+main_categories <- c("Hard Coral", "Soft Coral", "Turf Algae", "Macroalgae", "Crustose Coralline Algae", "Sponge", "Rock")
+
+# =============================================================================
+# 1. PREPARE THE STANDARDIZED COMMUNITY WIDE MATRIX
+# =============================================================================
+prepare_community_data <- function(data, categories) {
+  data %>%
+    pivot_longer(
+      cols = all_of(categories),
+      names_to = "Category",
+      values_to = "Cover_Pct"
+    ) %>%
+    group_by(Dive_ID, Site_clean, Year, Category) %>%
+    summarise(Cover_Pct = mean(Cover_Pct, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(
+      names_from = Category, 
+      values_from = Cover_Pct, 
+      values_fill = 0
+    ) %>%
+    mutate(
+      Year_fac = factor(Year),
+      Site_fac = factor(Site_clean)
+    )
+}
+
+permanova_glmm_data <- prepare_community_data(bayes_benthic_df, main_categories)
+comm_matrix <- permanova_glmm_data %>% select(all_of(main_categories))
+
+
+# =============================================================================
+# 2. GLOBAL PERMANOVA MODEL (Omnibus Test)
+# =============================================================================
+run_global_permanova <- function(comm_mat, meta_data) {
+  message("\n>>> Running Global PERMANOVA Model")
+  
+  global_res <- adonis2(
+    comm_mat ~ Year_fac + Site_fac,
+    data = meta_data,
+    permutations = 999,
+    method = "bray"
+  )
+  
+  print(global_res)
+  
+  # Format and save for appendix
+  global_table <- as.data.frame(global_res) %>%
+    rownames_to_column(var = "Source") %>%
+    mutate(across(where(is.numeric), ~ round(., 4)))
+  
+  write_csv(global_table, "permanova_global_model_summary.csv")
+  message(">>> Saved global PERMANOVA summary to 'permanova_global_model_summary.csv'")
+  
+  return(global_res)
+}
+
+global_fit <- run_global_permanova(comm_matrix, permanova_glmm_data)
+
+
+# =============================================================================
+# 3. PAIRWISE PERMANOVAS (With Corrected Df Extraction & BH Correction)
+# =============================================================================
+run_pairwise_permanova_with_df <- function(meta_data, categories) {
+  message("\n>>> Running Pairwise PERMANOVAs Across Survey Years (with Df)")
+  
+  years <- sort(unique(meta_data$Year))
+  year_pairs <- combn(years, 2, simplify = FALSE)
+  
+  pairwise_results <- map_dfr(year_pairs, function(p) {
+    yr1 <- p[1]
+    yr2 <- p[2]
+    
+    sub_data <- meta_data %>% filter(Year %in% c(yr1, yr2))
+    sub_comm <- sub_data %>% select(all_of(categories))
+    
+    res <- adonis2(
+      sub_comm ~ Year_fac + Site_fac, 
+      data = sub_data, 
+      permutations = 999, 
+      method = "bray"
+    )
+    
+    # Explicitly extract Df for Year_fac by row name (guarantees a value of 1)
+    target_row <- which(rownames(res) == "Year_fac")
+    model_df <- ifelse(length(target_row) > 0, res$Df[target_row], 1)
+    
+    tibble(
+      Comparison = paste0(yr1, " vs ", yr2),
+      `Df` = model_df,  # Will now correctly show 1 for every row
+      `R-Squared` = round(res$R2[1], 4),
+      `Pseudo-F` = round(res$`F`[1], 4),
+      `P-Value` = res$`Pr(>F)`[1]
+    )
+  })
+  
+  # Apply Benjamini-Hochberg (BH) correction
+  pairwise_results <- pairwise_results %>%
+    mutate(
+      `Adj P-Value` = p.adjust(`P-Value`, method = "BH"),
+      `P-Value` = ifelse(`P-Value` < 0.001, "< 0.001", as.character(round(`P-Value`, 4))),
+      `Adj P-Value` = ifelse(`Adj P-Value` < 0.001, "< 0.001", as.character(round(`Adj P-Value`, 4)))
+    )
+  
+  write_csv(pairwise_results, "permanova_pairwise_with_df_summary.csv")
+  message(">>> Saved pairwise PERMANOVA summary to 'permanova_pairwise_with_df_summary.csv'")
+  
+  return(pairwise_results)
+}
+
+# Run it
+pairwise_perm_table <- run_pairwise_permanova_with_df(permanova_glmm_data, main_categories)
+print(knitr::kable(pairwise_perm_table, format = "markdown", caption = "Pairwise Community PERMANOVA Comparisons Between Years"))
+
+
+# =============================================================================
+# 4. HOMOGENEITY OF MULTIVARIATE DISPERSIONS (betadisper / PERMDISP)
+# =============================================================================
+run_permanova_dispersion <- function(comm_mat, meta_data) {
+  message("\n>>> Running Multivariate Homogeneity of Dispersions (betadisper)")
+  
+  comm_dist <- vegdist(comm_mat, method = "bray")
+  mod_disp <- betadisper(comm_dist, meta_data$Year_fac)
+  
+  # 1. ANOVA Table
+  disp_anova <- anova(mod_disp)
+  print(disp_anova)
+  
+  disp_table <- as.data.frame(disp_anova) %>%
+    rownames_to_column(var = "Source") %>%
+    mutate(across(where(is.numeric), ~ round(., 4)))
+  
+  write_csv(disp_table, "permanova_dispersion_summary.csv")
+  message(">>> Saved dispersion ANOVA summary to 'permanova_dispersion_summary.csv'")
+  
+  # 2. Tukey HSD Post-Hoc Table
+  disp_hsd <- TukeyHSD(mod_disp)
+  print(disp_hsd)
+  
+  disp_hsd_df <- as.data.frame(disp_hsd$group) %>%
+    rownames_to_column(var = "Comparison") %>%
+    mutate(across(where(is.numeric), ~ round(., 4)))
+  
+  write_csv(disp_hsd_df, "permanova_dispersion_tukey_summary.csv")
+  message(">>> Saved dispersion Tukey HSD summary to 'permanova_dispersion_tukey_summary.csv'")
+  
+  return(list(model = mod_disp, anova = disp_table, hsd = disp_hsd_df))
+}
+
+# Run it
+dispersion_results <- run_permanova_dispersion(comm_matrix, permanova_glmm_data)
+```
